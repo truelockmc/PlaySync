@@ -12,7 +12,7 @@ class SpotifyClient:
     def __init__(self):
         self.client_id = os.getenv("SPOTIFY_CLIENT_ID")
         self.client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
-        self.redirect_uri = "http://localhost:8888/callback"
+        self.redirect_uri = "http://127.0.0.1:8888/callback"
         self.scope = "playlist-read-private playlist-modify-public playlist-modify-private user-library-read user-top-read"
         self.sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
             client_id=self.client_id,
