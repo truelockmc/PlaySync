@@ -12,7 +12,7 @@ class SpotifyClient:
     def __init__(self):
         self.client_id = os.getenv("SPOTIFY_CLIENT_ID")
         self.client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
-        self.redirect_uri = "http://localhost:8888/callback"
+        self.redirect_uri = "http://127.0.0.1:8888/callback"
         self.scope = "playlist-read-private playlist-modify-public playlist-modify-private user-library-read user-top-read"
         self.sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
             client_id=self.client_id,
@@ -22,17 +22,45 @@ class SpotifyClient:
         ))
         self.user_id = self.sp.current_user()["id"]
 
-    def get_playlist_tracks(self, playlist_url):
+    def get_playlist_tracks(self, playlist_url, max_tracks=None):
+
         playlist_id = playlist_url.split("/")[-1].split("?")[0]
-        results = self.sp.playlist_tracks(playlist_id)
+        limit = 100  # Spotify max per page
+        offset = 0
         tracks = []
-        for item in results['items']:
-            track = item['track']
-            tracks.append({
-                "name": track['name'],
-                "artist": track['artists'][0]['name'],
-                "album": track['album']['name']
-            })
+
+        while True:
+            # Request a page
+            results = self.sp.playlist_tracks(playlist_id, limit=limit, offset=offset)
+            items = results.get('items', [])
+            if not items:
+                break
+
+            for item in items:
+                track = item.get('track') if isinstance(item, dict) and 'track' in item else item
+                if not track:
+                    continue
+
+                if track is None:
+                    continue
+
+                artist_name = track['artists'][0]['name'] if track.get('artists') else ""
+                tracks.append({
+                    "name": track.get('name'),
+                    "artist": artist_name,
+                    "album": track.get('album', {}).get('name') if track.get('album') else "",
+                    "id": track.get('id')
+                })
+
+                if max_tracks and len(tracks) >= max_tracks:
+                    return tracks
+
+            # If there's a next page, increment offset and continue
+            next_url = results.get('next')
+            if not next_url:
+                break
+            offset += len(items)
+
         return tracks
 
     def create_playlist(self, name):

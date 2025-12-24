@@ -3,27 +3,170 @@ from apple_client import AppleMusicClient
 from youtube_client import YouTubeMusicClient
 from utils import PlaylistUtils
 
+# --- Logging setup ---
+import logging
+import time
+
+logger = logging.getLogger("playsync")
+logger.setLevel(logging.INFO)
+
+# Console handler
+ch = logging.StreamHandler()
+ch.setLevel(logging.INFO)
+ch_formatter = logging.Formatter("%(asctime)s %(levelname)s: %(message)s", "%H:%M:%S")
+ch.setFormatter(ch_formatter)
+logger.addHandler(ch)
+
+
+
 def get_tracks(source_client, source_type, source_id):
-    if source_type == "Spotify":
-        return source_client.get_playlist_tracks(source_id)
-    elif source_type == "Apple Music":
-        return source_client.get_playlist_tracks(source_id)
-    elif source_type == "YouTube Music":
-        return source_client.get_playlist_tracks(source_id)
-    return []
+    logger.info("Fetching playlist from %s: %s", source_type, source_id)
+    start = time.time()
+    try:
+        tracks = []
+        if source_type == "Spotify":
+            tracks = source_client.get_playlist_tracks(source_id)
+        elif source_type == "Apple Music":
+            tracks = source_client.get_playlist_tracks(source_id)
+        elif source_type == "YouTube Music":
+            tracks = source_client.get_playlist_tracks(source_id)
+        else:
+            logger.warning("Unknown source type: %s", source_type)
+            return []
+    except Exception as e:
+        logger.exception("Failed to fetch tracks from %s: %s", source_type, e)
+        return []
 
-def add_to_target(target_client, target_type, playlist_name, tracks):
-    playlist_id = target_client.create_playlist(playlist_name)
-    added_count = target_client.add_tracks(playlist_id, tracks)
-    print(f"Added {added_count} tracks to {target_type} playlist: {playlist_name}")
-    return playlist_id
+    elapsed = time.time() - start
+    logger.info("Retrieved %d tracks from %s in %.1f s", len(tracks), source_type, elapsed)
+    return tracks
 
-def convert_playlist(source_client, source_type, target_clients, source_id):
+
+def add_to_target(clients_dict, target_type, playlist_name, tracks):
+
+    target_client = clients_dict.get(target_type)
+    if target_client is None:
+        logger.error("No client configured for target platform: %s. Available: %s", target_type, ", ".join(clients_dict.keys()))
+        return False
+
+    logger.info("Start creating playlist '%s' on %s", playlist_name, target_type)
+    create_start = time.time()
+    try:
+        playlist_id = target_client.create_playlist(playlist_name)
+    except Exception as e:
+        logger.exception("Failed to create playlist on %s: %s", target_type, e)
+
+        if hasattr(target_client, "last_response"):
+            resp = target_client.last_response
+            try:
+                logger.debug("Last response status: %s", getattr(resp, "status_code", None))
+                logger.debug("Last response text: %s", getattr(resp, "text", None))
+            except Exception:
+                pass
+        return False
+
+    create_elapsed = time.time() - create_start
+    logger.info("Created playlist on %s (id=%s) in %.1f s", target_type, playlist_id, create_elapsed)
+
+    # Add tracks: prefer batch add_tracks if available, otherwise fall back to per-track add_track
+    logger.info("Adding %d tracks to playlist %s on %s ...", len(tracks), playlist_id, target_type)
+    add_start = time.time()
+    try:
+        if hasattr(target_client, "add_tracks"):
+            # Batch API
+            target_client.add_tracks(playlist_id, tracks)
+            logger.info("Batch add_tracks finished for %s", target_type)
+        elif hasattr(target_client, "add_track"):
+            # Fall back to per-track calls with intermittent logging
+            total = len(tracks)
+            for idx, track in enumerate(tracks, start=1):
+                try:
+                    target_client.add_track(playlist_id, track)
+                except Exception as e:
+                    logger.exception("Failed to add track #%d to %s: %s", idx, target_type, e)
+
+                if idx % 10 == 0 or idx == total:
+                    logger.info("Progress for %s: %d/%d tracks added", target_type, idx, total)
+        else:
+            logger.error("Target client for %s has no add_tracks/add_track method; cannot add tracks.", target_type)
+            return False
+    except Exception as e:
+        logger.exception("Error while adding tracks to %s: %s", target_type, e)
+        if hasattr(target_client, "last_response"):
+            resp = target_client.last_response
+            try:
+                logger.debug("Last response status: %s", getattr(resp, "status_code", None))
+                logger.debug("Last response text: %s", getattr(resp, "text", None))
+            except Exception:
+                pass
+        return False
+
+    add_elapsed = time.time() - add_start
+    logger.info("Finished adding tracks to %s in %.1f s (total time %.1f s)", target_type, add_elapsed, create_elapsed + add_elapsed)
+    return True
+
+
+def convert_playlist(clients_dict, source_type, target_types, source_id):
+
+    logger.info("Starting conversion: source=%s id=%s", source_type, source_id)
+    source_client = clients_dict.get(source_type)
+    if source_client is None:
+        logger.error("No client configured for source platform: %s", source_type)
+        return
+
     tracks = get_tracks(source_client, source_type, source_id)
-    print(f"Retrieved {len(tracks)} tracks from {source_type}.")
-    target_name = input(f"Enter name for new playlist(s): ")
-    for target_client, target_type in target_clients.items():
-        add_to_target(target_client, target_type, target_name, tracks)
+    if not tracks:
+        logger.warning("No tracks found in source playlist; aborting conversion.")
+        return
+
+    playlist_name = input("Enter name for new playlist(s): ").strip()
+    if not playlist_name:
+        logger.info("Conversion cancelled by user (empty playlist name).")
+        return
+
+    # Normalize available target platforms
+    if isinstance(target_types, dict):
+        available_targets = list(target_types.keys())
+    else:
+        available_targets = list(target_types)
+
+    logger.info("Available target platforms: %s", ", ".join(available_targets))
+    sel = input("Select target platforms (comma-separated), or type 'all' to use all: ").strip()
+    if not sel:
+        logger.info("No selection made. Aborting conversion.")
+        return
+
+    if sel.lower() == "all":
+        resolved_targets = [t for t in available_targets if t != source_type]
+    else:
+        chosen = [s.strip() for s in sel.split(",") if s.strip()]
+        invalid = [c for c in chosen if c not in available_targets]
+        if invalid:
+            logger.error("Invalid target platform(s) selected: %s", ", ".join(invalid))
+            return
+        resolved_targets = [t for t in chosen if t != source_type]
+
+    if not resolved_targets:
+        logger.info("No valid target platforms selected (source was excluded).")
+        return
+
+    logger.info("Converting playlist '%s' to: %s", playlist_name, ", ".join(resolved_targets))
+
+    # Create a lookup dict so add_to_target can resolve clients if target_types was a list
+    targets_lookup = target_types if isinstance(target_types, dict) else {k: clients_dict.get(k) for k in resolved_targets}
+
+    overall_start = time.time()
+    for target_type in resolved_targets:
+        logger.info("=== Processing target: %s ===", target_type)
+        try:
+            ok = add_to_target(targets_lookup if isinstance(targets_lookup, dict) else clients_dict, target_type, playlist_name, tracks)
+            if not ok:
+                logger.warning("Conversion to %s failed or was incomplete. Continuing with next target.", target_type)
+        except Exception as e:
+            logger.exception("Unhandled exception while converting to %s: %s", target_type, e)
+    overall_elapsed = time.time() - overall_start
+    logger.info("Conversion finished for '%s' (total time: %.1f s).", playlist_name, overall_elapsed)
+
 
 def merge_playlists(clients, sources):
     all_tracks = set()
@@ -35,7 +178,7 @@ def merge_playlists(clients, sources):
     print(f"Merged into {len(merged_tracks)} unique tracks.")
     target_type = input("Enter target platform (Spotify, Apple Music, YouTube Music): ")
     target_name = input("Enter name for merged playlist: ")
-    add_to_target(clients[target_type], target_type, target_name, merged_tracks)
+    add_to_target(clients, target_type, target_name, merged_tracks)
 
 def compare_playlists(clients, sources):
     track_sets = {}
@@ -510,7 +653,7 @@ def main():
             source_type = input("Source platform (Spotify, Apple Music, YouTube Music): ")
             source_id = input(f"Enter {source_type} playlist URL/ID: ")
             target_clients = {k: v for k, v in clients.items() if k != source_type}
-            convert_playlist(clients[source_type], source_type, target_clients, source_id)
+            convert_playlist(clients, source_type, target_clients, source_id)
 
         elif choice == "2":
             sources = {}
