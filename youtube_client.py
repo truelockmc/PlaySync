@@ -2,8 +2,10 @@ from ytmusicapi import YTMusic
 import os
 import json
 import csv
+import re
 from datetime import datetime
 from dotenv import load_dotenv
+from urllib.parse import urlparse, parse_qs
 
 load_dotenv()
 
@@ -12,16 +14,67 @@ class YouTubeMusicClient:
         # Assumes auth via headers file; see ytmusicapi setup instructions
         self.yt = YTMusic(os.getenv("YOUTUBE_AUTH_FILE"))
 
+    def _extract_playlist_id(self, playlist_input):
+        """Extract playlist ID from URL or return the input if it's already an ID"""
+        if not playlist_input:
+            return None
+        
+        # If it's already a playlist ID (starts with PL), return it
+        if playlist_input.startswith('PL') and len(playlist_input) > 2:
+            return playlist_input
+        
+        # Try to extract from URL
+        try:
+            parsed_url = urlparse(playlist_input)
+            # Check for music.youtube.com URLs
+            if 'music.youtube.com' in parsed_url.netloc or 'youtube.com' in parsed_url.netloc:
+                query_params = parse_qs(parsed_url.query)
+                if 'list' in query_params:
+                    return query_params['list'][0]
+            
+            # Check for youtube.com/watch URLs with list parameter
+            if parsed_url.path == '/watch' or parsed_url.path == '/playlist':
+                query_params = parse_qs(parsed_url.query)
+                if 'list' in query_params:
+                    return query_params['list'][0]
+            
+            # Try regex as fallback
+            match = re.search(r'[?&]list=([a-zA-Z0-9_-]+)', playlist_input)
+            if match:
+                return match.group(1)
+        except Exception:
+            pass
+        
+        # If no extraction worked, return the input as-is (might be a valid ID)
+        return playlist_input
+
     def get_playlist_tracks(self, playlist_id):
-        playlist = self.yt.get_playlist(playlist_id)
-        tracks = []
-        for track in playlist['tracks']:
-            tracks.append({
-                "name": track['title'],
-                "artist": track['artists'][0]['name'] if track['artists'] else "Unknown",
-                "album": track.get('album', {}).get('name', '')
-            })
-        return tracks
+        try:
+            # Extract playlist ID from URL if needed
+            extracted_id = self._extract_playlist_id(playlist_id)
+            if not extracted_id:
+                raise ValueError(f"Could not extract playlist ID from: {playlist_id}")
+            
+            playlist = self.yt.get_playlist(extracted_id)
+            
+            # Check if playlist has tracks
+            if not playlist or 'tracks' not in playlist:
+                return []
+            
+            tracks = []
+            for track in playlist['tracks']:
+                # Handle different track formats that ytmusicapi might return
+                if isinstance(track, dict):
+                    tracks.append({
+                        "name": track.get('title', 'Unknown'),
+                        "artist": track.get('artists', [{}])[0].get('name', 'Unknown') if track.get('artists') else "Unknown",
+                        "album": track.get('album', {}).get('name', '') if isinstance(track.get('album'), dict) else ''
+                    })
+            return tracks
+        except KeyError as e:
+            raise Exception(f"Failed to parse playlist response. The playlist might be private, deleted, or the API response format has changed. Error: {e}")
+        except Exception as e:
+            raise Exception(f"Failed to fetch playlist tracks: {e}")
 
     def create_playlist(self, name):
         playlist_id = self.yt.create_playlist(name, "Created by PlaySync")
@@ -43,7 +96,11 @@ class YouTubeMusicClient:
     def analyze_playlist(self, playlist_id):
         """Get detailed statistics about a playlist"""
         try:
-            playlist = self.yt.get_playlist(playlist_id)
+            extracted_id = self._extract_playlist_id(playlist_id)
+            if not extracted_id:
+                raise ValueError(f"Could not extract playlist ID from: {playlist_id}")
+            
+            playlist = self.yt.get_playlist(extracted_id)
             tracks = self.get_playlist_tracks(playlist_id)
             
             # Calculate statistics
@@ -96,7 +153,11 @@ class YouTubeMusicClient:
     def export_playlist(self, playlist_id, format='json'):
         """Export playlist to various formats"""
         try:
-            playlist = self.yt.get_playlist(playlist_id)
+            extracted_id = self._extract_playlist_id(playlist_id)
+            if not extracted_id:
+                raise ValueError(f"Could not extract playlist ID from: {playlist_id}")
+            
+            playlist = self.yt.get_playlist(extracted_id)
             tracks = self.get_playlist_tracks(playlist_id)
             
             if format == 'json':
@@ -181,7 +242,11 @@ class YouTubeMusicClient:
     def duplicate_playlist(self, playlist_id, new_name=None):
         """Duplicate a playlist"""
         try:
-            playlist = self.yt.get_playlist(playlist_id)
+            extracted_id = self._extract_playlist_id(playlist_id)
+            if not extracted_id:
+                raise ValueError(f"Could not extract playlist ID from: {playlist_id}")
+            
+            playlist = self.yt.get_playlist(extracted_id)
             tracks = self.get_playlist_tracks(playlist_id)
             
             name = new_name or f"{playlist.get('title', 'Unknown')} (Copy)"
@@ -328,7 +393,11 @@ class YouTubeMusicClient:
     def get_playlist_audio_info(self, playlist_id):
         """Get audio information for playlist tracks"""
         try:
-            playlist = self.yt.get_playlist(playlist_id)
+            extracted_id = self._extract_playlist_id(playlist_id)
+            if not extracted_id:
+                raise ValueError(f"Could not extract playlist ID from: {playlist_id}")
+            
+            playlist = self.yt.get_playlist(extracted_id)
             audio_info = []
             
             for track in playlist['tracks']:
